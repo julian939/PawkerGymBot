@@ -92,7 +92,7 @@ def live_match_embed(ch: Challenge) -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="📸 Post a result screenshot to <#1486978773290061974>",
+        name="📸 Post a result screenshot to <#1499418254861664450>",
         value="Include the room code in your message.",
         inline=False,
     )
