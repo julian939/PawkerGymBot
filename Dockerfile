@@ -6,11 +6,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install deps first (layer caching)
+# Copy source and install
 COPY pyproject.toml ./
+COPY bot ./bot
 RUN pip install --no-cache-dir .
 
-# Copy source
+# Copy remaining files (schema.sql, etc.)
 COPY . .
 
 CMD ["python", "-m", "bot.main"]
