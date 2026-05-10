@@ -1,0 +1,16 @@
+[project]
+name = "match-challenge-bot"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "discord.py>=2.4.0",
+    "aiosqlite>=0.20.0",
+    "python-dotenv>=1.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["bot"]

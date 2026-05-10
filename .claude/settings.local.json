@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in ['bot/service.py','bot/views.py','bot/cog.py','bot/tasks.py','bot/main.py']]\")",
+      "Bash(python3 *)",
+      "Bash(uv sync *)",
+      "Bash(python *)",
+      "Bash(sqlite3 *)"
+    ]
+  }
+}
