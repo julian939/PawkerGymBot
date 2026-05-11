@@ -6,7 +6,7 @@ from typing import Mapping
 STATUS_PENDING = "PENDING"
 STATUS_ACCEPTED = "ACCEPTED"
 STATUS_CANCELLED = "CANCELLED"
-STATUS_EXPIRED = "EXPIRED"
+STATUS_COMPLETED = "COMPLETED"
 
 TYPE_ATTACK = "attack"
 TYPE_DEFEND = "defend"
@@ -24,7 +24,6 @@ def _parse_dt(value) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    # SQLite returns ISO 8601 strings written by datetime.isoformat()
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -46,7 +45,6 @@ class Challenge:
     accepted_at: datetime | None
     cancelled_at: datetime | None
     cancelled_by: int | None
-    expires_at: datetime
     admin_message_id: int | None = None
 
     @classmethod
@@ -65,6 +63,5 @@ class Challenge:
             accepted_at=_parse_dt(record["accepted_at"]),
             cancelled_at=_parse_dt(record["cancelled_at"]),
             cancelled_by=record["cancelled_by"],
-            expires_at=_parse_dt(record["expires_at"]),
             admin_message_id=_safe_get(record, "admin_message_id"),
         )

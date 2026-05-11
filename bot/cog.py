@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from bot.models import TYPE_ATTACK, TYPE_DEFEND
 from bot.repository import ChallengeRepository
 from bot.service import ChallengeService
-from bot.tasks import ExpiryLoop
 from bot.views import CancelPickerView
 
 log = logging.getLogger(__name__)
@@ -27,23 +27,46 @@ class ChallengesCog(commands.Cog):
         self.bot = bot
         self.service = service
         self.repo = repo
-        self.expiry_loop: ExpiryLoop | None = None
+        self.expire_accepted_loop.start()
 
-    async def cog_load(self) -> None:
-        self.expiry_loop = ExpiryLoop(self.service, self.repo)
-        self.expiry_loop.start()
+    def cog_unload(self) -> None:
+        self.expire_accepted_loop.cancel()
 
-    async def cog_unload(self) -> None:
-        if self.expiry_loop is not None:
-            self.expiry_loop.stop()
+    # ------------------------------------------------------------------ #
+    # Background: expire ACCEPTED matches with no /result after 24h
+    # ------------------------------------------------------------------ #
+
+    @tasks.loop(minutes=5)
+    async def expire_accepted_loop(self) -> None:
+        hours = getattr(
+            self.bot.config, "accepted_match_expiry_hours", 24
+        )
+        deadline = datetime.now(timezone.utc) - timedelta(hours=hours)
+        try:
+            expired = await self.repo.fetch_expired_accepted(
+                deadline_iso=deadline.isoformat()
+            )
+        except Exception:
+            log.exception("expire_accepted_loop: fetch failed")
+            return
+
+        for ch in expired:
+            try:
+                await self.service.expire_accepted_match(ch)
+            except Exception:
+                log.exception(
+                    "expire_accepted_loop: failed to expire match %s", ch.id
+                )
+
+    @expire_accepted_loop.before_loop
+    async def _before_expire_accepted_loop(self) -> None:
+        await self.bot.wait_until_ready()
 
     # ------------------------------------------------------------------ #
     # /attack
     # ------------------------------------------------------------------ #
 
-    @app_commands.command(
-        name="attack", description="Challenge as Attacker"
-    )
+    @app_commands.command(name="attack", description="Challenge as Attacker")
     @app_commands.describe(
         user="Optional. If omitted, posts an Open Challenge."
     )
@@ -65,9 +88,7 @@ class ChallengesCog(commands.Cog):
     # /defend
     # ------------------------------------------------------------------ #
 
-    @app_commands.command(
-        name="defend", description="Challenge as Defender"
-    )
+    @app_commands.command(name="defend", description="Challenge as Defender")
     @app_commands.describe(
         user="Optional. If omitted, posts an Open Challenge."
     )
@@ -131,3 +152,20 @@ class ChallengesCog(commands.Cog):
             view=view,
             ephemeral=True,
         )
+        view.message = await interaction.original_response()
+
+    # ------------------------------------------------------------------ #
+    # /result
+    # ------------------------------------------------------------------ #
+
+    @app_commands.command(
+        name="result",
+        description="Submit a result screenshot for your active match",
+    )
+    @app_commands.describe(screenshot="Screenshot of the match result")
+    async def result(
+        self,
+        interaction: discord.Interaction,
+        screenshot: discord.Attachment,
+    ) -> None:
+        await self.service.submit_result(interaction, screenshot)

@@ -8,8 +8,8 @@ class Config:
     database_path: str
     dev_guild_id: int | None
     admin_channel_id: int | None
-    challenge_expiry_hours: int = 24
     max_pending_per_user: int = 3
+    accepted_match_expiry_hours: int = 24
 
     @classmethod
     def from_env(cls) -> "Config":

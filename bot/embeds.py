@@ -1,10 +1,4 @@
-"""Discord embed builders.
-
-Embeds give us the polished look (colors, fields, code blocks). To actually
-*ping* a user, the call site sends the user mentions in the message
-`content` alongside the embed — mentions inside an embed body don't trigger
-notifications.
-"""
+"""Discord embed builders. All single-line, minimal."""
 
 import discord
 
@@ -18,10 +12,6 @@ COLOR_GRAY = 0x95A5A6
 
 
 def attacker_defender_ids(ch: Challenge) -> tuple[int, int]:
-    """Return (attacker_id, defender_id) based on challenge_type.
-
-    For accepted challenges, ch.opponent_id must be set.
-    """
     if ch.challenge_type == TYPE_ATTACK:
         return ch.challenger_id, ch.opponent_id  # type: ignore[return-value]
     return ch.opponent_id, ch.challenger_id  # type: ignore[return-value]
@@ -32,111 +22,96 @@ def attacker_defender_ids(ch: Challenge) -> tuple[int, int]:
 # ---------------------------------------------------------------------- #
 
 def direct_challenge_embed(ch: Challenge) -> discord.Embed:
-    challenger = f"<@{ch.challenger_id}>"
-    opponent = f"<@{ch.opponent_id}>"
-
+    a = f"<@{ch.challenger_id}>"
+    b = f"<@{ch.opponent_id}>"
     if ch.challenge_type == TYPE_ATTACK:
-        title = "🗡️ Attack Challenge"
-        color = COLOR_ATTACK
-        roles = f"{challenger} attacks · {opponent} defends"
-    else:
-        title = "🛡️ Defend Challenge"
-        color = COLOR_DEFEND
-        roles = f"{opponent} attacks · {challenger} defends"
-
+        embed = discord.Embed(
+            description=f"🗡️ {a} challenges {b}", color=COLOR_ATTACK
+        )
+        #embed.set_footer(text="Use /defend to accept")
+        return embed
     embed = discord.Embed(
-        title=title,
-        description=(
-            f"{challenger} has challenged {opponent}.\n"
-            f"{roles}\n\n"
-            f"Tap **Accept** below to start the match."
-        ),
-        color=color,
+        description=f"🛡️ {a} challenges {b}", color=COLOR_DEFEND
     )
-    embed.set_footer(text="Expires in 24h · /cancel to withdraw")
+    #embed.set_footer(text="Use /attack to accept")
     return embed
 
 
 def open_challenge_embed(ch: Challenge) -> discord.Embed:
-    challenger = f"<@{ch.challenger_id}>"
-
+    a = f"<@{ch.challenger_id}>"
     if ch.challenge_type == TYPE_ATTACK:
-        title = "⏳ Open Challenge — Looking for Defender"
-        color = COLOR_ATTACK
-        hint = "Tap **Accept** below or run `/defend` to take the match."
-    else:
-        title = "⏳ Open Challenge — Looking for Attacker"
-        color = COLOR_DEFEND
-        hint = "Tap **Accept** below or run `/attack` to take the match."
-
+        embed = discord.Embed(
+            description=f"🗡️ {a} looking for defender",
+            color=COLOR_ATTACK,
+        )
+        #embed.set_footer(text="Use /defend to accept")
+        return embed
     embed = discord.Embed(
-        title=title,
-        description=f"{challenger} is waiting for an opponent.\n{hint}",
-        color=color,
+        description=f"🛡️ {a} looking for attacker",
+        color=COLOR_DEFEND,
     )
-    embed.set_footer(text="Expires in 24h · /cancel to withdraw")
+    #embed.set_footer(text="Use /attack to accept")
     return embed
 
 
 def live_match_embed(ch: Challenge) -> discord.Embed:
     a, d = attacker_defender_ids(ch)
     embed = discord.Embed(
-        title="⚔️ Match",
+        description=f"🗡️ <@{a}> vs 🛡️ <@{d}> · *`{ch.room_code}`*",
         color=COLOR_LIVE,
     )
-    embed.add_field(name="🗡️ Attacker", value=f"<@{a}>", inline=True)
-    embed.add_field(name="🛡️ Defender", value=f"<@{d}>", inline=True)
-    embed.add_field(
-        name="🔑 Room Code",
-        value=f"```\n{ch.room_code}\n```",
-        inline=False,
-    )
-    embed.add_field(
-        name="📸 Post a result screenshot to <#1499418254861664450>",
-        value="Include the room code in your message.",
-        inline=False,
-    )
-    embed.set_footer(text="Matched by mistake? Run /cancel")
+    embed.set_footer(text="Use /result to submit the match result")
     return embed
 
 
 def match_cancelled_embed(ch: Challenge, cancelled_by: int) -> discord.Embed:
-    a, d = attacker_defender_ids(ch)
     return discord.Embed(
-        title="🚫 Match Cancelled",
-        description=(
-            f"Cancelled by <@{cancelled_by}>\n"
-            f"Was: <@{a}> (Attacker) vs <@{d}> (Defender) · `{ch.room_code}`"
-        ),
-        color=COLOR_GRAY,
+        description=f"🚫 Cancelled by <@{cancelled_by}>", color=COLOR_GRAY
     )
 
 
 def challenge_cancelled_embed(ch: Challenge, cancelled_by: int) -> discord.Embed:
     return discord.Embed(
-        title="🚫 Challenge Cancelled",
-        description=f"Cancelled by <@{cancelled_by}>",
+        description=f"🚫 Cancelled by <@{cancelled_by}>", color=COLOR_GRAY
+    )
+
+
+def match_completed_embed(ch: Challenge) -> discord.Embed:
+    a, d = attacker_defender_ids(ch)
+    return discord.Embed(
+        description=f"✅ <@{a}> vs <@{d}> · result submitted",
         color=COLOR_GRAY,
     )
 
 
-def challenge_expired_embed(ch: Challenge) -> discord.Embed:
+def match_expired_embed(ch: Challenge) -> discord.Embed:
+    a, d = attacker_defender_ids(ch)
     return discord.Embed(
-        title="⏰ Challenge Expired",
-        description="No one accepted within 24h.",
+        description=(
+            f"⏰ <@{a}> vs <@{d}> · no result submitted within 24h"
+        ),
         color=COLOR_GRAY,
     )
 
 
 # ---------------------------------------------------------------------- #
-# Admin-channel embeds (no pings, embed-only)
+# Admin-channel embeds
 # ---------------------------------------------------------------------- #
 
 def admin_match_started_embed(ch: Challenge) -> discord.Embed:
     a, d = attacker_defender_ids(ch)
     return discord.Embed(
+        description=f"🗡️ <@{a}> vs 🛡️ <@{d}> · *`{ch.room_code}`*",
+        color=COLOR_LIVE,
+    )
+
+
+def admin_result_embed(ch: Challenge, submitted_by: int) -> discord.Embed:
+    a, d = attacker_defender_ids(ch)
+    return discord.Embed(
         description=(
-            f"🔑 `{ch.room_code}`  ·  🗡️ <@{a}>  vs  🛡️ <@{d}>"
+            f"🗡️ <@{a}> vs 🛡️ <@{d}> · *`{ch.room_code}`* · "
+            f"submitted by <@{submitted_by}>"
         ),
         color=COLOR_LIVE,
     )

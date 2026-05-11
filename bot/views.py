@@ -49,7 +49,7 @@ class AcceptButtonView(discord.ui.View):
         if repo is None or service is None:
             log.error("AcceptButtonView callback could not resolve repo/service")
             await interaction.response.send_message(
-                "Bot is not ready yet. Try again in a moment.", ephemeral=True
+                "Try again in a moment.", ephemeral=True
             )
             return
 
@@ -167,8 +167,6 @@ class _CancelSelect(discord.ui.Select):
             challenge=ch, cancelled_by=interaction.user.id
         )
 
-        for child in view.children:
-            child.disabled = True
         view.stop()
         await interaction.response.edit_message(
             content="Challenge cancelled.", view=None
@@ -215,7 +213,16 @@ class CancelPickerView(discord.ui.View):
         self.all_options = all_options
         self.challenges_by_id = challenges_by_id
         self.page = 0
+        self.message: discord.Message | discord.WebhookMessage | None = None
         self._render()
+
+    async def on_timeout(self) -> None:
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(content="Picker timed out.", view=None)
+        except Exception:
+            pass
 
     @property
     def total_pages(self) -> int:
@@ -265,4 +272,130 @@ class CancelPickerView(discord.ui.View):
             challenges_by_id=challenges_by_id,
             user_id=user_id,
             service=service,
+        )
+
+
+# ---------------------------------------------------------------------- #
+# Result picker
+# ---------------------------------------------------------------------- #
+
+async def _result_select_label(
+    ch: Challenge,
+    user_id: int,
+    guild: discord.Guild | None,
+    client: discord.Client | None,
+) -> str:
+    other_id = (
+        ch.opponent_id if ch.challenger_id == user_id else ch.challenger_id
+    )
+    if other_id is None:
+        label = f"Match · {ch.room_code}"
+    else:
+        other = await _resolve_name(other_id, guild, client)
+        label = f"vs {other} · {ch.room_code}"
+    if len(label) > 100:
+        label = label[:97] + "..."
+    return label
+
+
+class _ResultSelect(discord.ui.Select):
+    def __init__(self, options: list[discord.SelectOption]):
+        super().__init__(
+            placeholder="Pick the match to submit the result for…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: "ResultPickerView" = self.view  # type: ignore[assignment]
+        if interaction.user.id != view.user_id:
+            await interaction.response.send_message(
+                "This picker isn't for you.", ephemeral=True
+            )
+            return
+
+        ch = view.challenges_by_id.get(int(self.values[0]))
+        if ch is None:
+            await interaction.response.send_message(
+                "Match not found.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+        _, msg = await view.service.finalize_result(
+            match=ch,
+            submitted_by=interaction.user.id,
+            file_bytes=view.file_bytes,
+            filename=view.filename,
+        )
+        view.stop()
+        await interaction.edit_original_response(content=msg, view=None)
+
+
+class ResultPickerView(discord.ui.View):
+    """Per-interaction picker for /result when the user has 2+ active matches.
+
+    Holds the already-downloaded screenshot bytes so the user does not have
+    to re-upload after selecting a match.
+    """
+
+    def __init__(
+        self,
+        *,
+        all_options: list[discord.SelectOption],
+        challenges_by_id: dict[int, Challenge],
+        user_id: int,
+        service,
+        file_bytes: bytes,
+        filename: str,
+    ):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.service = service
+        self.all_options = all_options
+        self.challenges_by_id = challenges_by_id
+        self.file_bytes = file_bytes
+        self.filename = filename
+        self.message: discord.Message | discord.WebhookMessage | None = None
+        self.add_item(_ResultSelect(all_options))
+
+    async def on_timeout(self) -> None:
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(content="Picker timed out.", view=None)
+        except Exception:
+            pass
+
+    @classmethod
+    async def build(
+        cls,
+        challenges: list[Challenge],
+        user_id: int,
+        service,
+        guild: discord.Guild | None,
+        client: discord.Client | None,
+        file_bytes: bytes,
+        filename: str,
+    ) -> "ResultPickerView":
+        challenges_by_id = {ch.id: ch for ch in challenges}
+        all_options: list[discord.SelectOption] = []
+        for ch in challenges:
+            all_options.append(
+                discord.SelectOption(
+                    label=await _result_select_label(
+                        ch, user_id, guild, client
+                    ),
+                    value=str(ch.id),
+                    description=f"Code: {ch.room_code}" if ch.room_code else None,
+                )
+            )
+        return cls(
+            all_options=all_options,
+            challenges_by_id=challenges_by_id,
+            user_id=user_id,
+            service=service,
+            file_bytes=file_bytes,
+            filename=filename,
         )

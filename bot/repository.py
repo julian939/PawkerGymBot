@@ -5,19 +5,12 @@ from bot.models import (
     Challenge,
     STATUS_ACCEPTED,
     STATUS_CANCELLED,
-    STATUS_EXPIRED,
     STATUS_PENDING,
 )
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _to_iso(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat()
 
 
 class ChallengeRepository:
@@ -50,15 +43,13 @@ class ChallengeRepository:
         guild_id: int,
         channel_id: int,
         message_id: int,
-        expires_at: datetime,
     ) -> Challenge:
-        created_at = _now_iso()
         sql = """
             INSERT INTO challenges (
                 challenger_id, opponent_id, challenge_type, status,
-                guild_id, channel_id, message_id, created_at, expires_at
+                guild_id, channel_id, message_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *;
         """
         params = (
@@ -69,8 +60,7 @@ class ChallengeRepository:
             guild_id,
             channel_id,
             message_id,
-            created_at,
-            _to_iso(expires_at),
+            _now_iso(),
         )
         async with self.db.lock:
             row = await self._fetchrow(sql, params)
@@ -190,6 +180,39 @@ class ChallengeRepository:
         )
         return [Challenge.from_record(r) for r in rows]
 
+    async def fetch_expired_accepted(
+        self, *, deadline_iso: str
+    ) -> list[Challenge]:
+        sql = """
+            SELECT *
+            FROM challenges
+            WHERE status = ?
+              AND accepted_at IS NOT NULL
+              AND accepted_at < ?;
+        """
+        rows = await self._fetchall(sql, (STATUS_ACCEPTED, deadline_iso))
+        return [Challenge.from_record(r) for r in rows]
+
+    async def find_accepted_for_user(
+        self,
+        *,
+        user_id: int,
+        guild_id: int,
+    ) -> list[Challenge]:
+        sql = """
+            SELECT *
+            FROM challenges
+            WHERE guild_id = ?
+              AND status = ?
+              AND (challenger_id = ? OR opponent_id = ?)
+            ORDER BY accepted_at DESC;
+        """
+        rows = await self._fetchall(
+            sql,
+            (guild_id, STATUS_ACCEPTED, user_id, user_id),
+        )
+        return [Challenge.from_record(r) for r in rows]
+
     async def set_status(
         self,
         challenge_id: int,
@@ -221,16 +244,6 @@ class ChallengeRepository:
             await self.db.conn.commit()
         return Challenge.from_record(row) if row else None
 
-    async def fetch_expired_pending(self) -> list[Challenge]:
-        sql = """
-            SELECT *
-            FROM challenges
-            WHERE status = ?
-              AND expires_at < ?;
-        """
-        rows = await self._fetchall(sql, (STATUS_PENDING, _now_iso()))
-        return [Challenge.from_record(r) for r in rows]
-
     async def count_pending_by_challenger(self, user_id: int) -> int:
         val = await self._fetchval(
             """
@@ -249,9 +262,6 @@ class ChallengeRepository:
         user_b: int,
         guild_id: int,
     ) -> bool:
-        """True if there's a PENDING direct challenge between the pair (any
-        direction). Accepted/live matches do NOT count — those don't block
-        new challenges."""
         sql = """
             SELECT EXISTS(
                 SELECT 1
@@ -278,8 +288,6 @@ class ChallengeRepository:
         guild_id: int,
         challenge_type: str,
     ) -> bool:
-        """True if the user already has a PENDING open challenge of this type
-        in this guild."""
         sql = """
             SELECT EXISTS(
                 SELECT 1
