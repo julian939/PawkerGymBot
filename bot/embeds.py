@@ -64,12 +64,6 @@ def live_match_embed(ch: Challenge) -> discord.Embed:
     return embed
 
 
-def match_cancelled_embed(ch: Challenge, cancelled_by: int) -> discord.Embed:
-    return discord.Embed(
-        description=f"🚫 Cancelled by <@{cancelled_by}>", color=COLOR_GRAY
-    )
-
-
 def match_completed_embed(ch: Challenge) -> discord.Embed:
     a, d = attacker_defender_ids(ch)
     return discord.Embed(

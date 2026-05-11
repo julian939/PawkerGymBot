@@ -170,13 +170,19 @@ class ChallengeRepository:
             SELECT *
             FROM challenges
             WHERE guild_id = ?
-              AND status IN (?, ?)
-              AND (challenger_id = ? OR opponent_id = ?)
+              AND (
+                    (status = ? AND challenger_id = ?)
+                 OR (status = ? AND (challenger_id = ? OR opponent_id = ?))
+              )
             ORDER BY created_at DESC;
         """
         rows = await self._fetchall(
             sql,
-            (guild_id, STATUS_PENDING, STATUS_ACCEPTED, user_id, user_id),
+            (
+                guild_id,
+                STATUS_PENDING, user_id,
+                STATUS_ACCEPTED, user_id, user_id,
+            ),
         )
         return [Challenge.from_record(r) for r in rows]
 

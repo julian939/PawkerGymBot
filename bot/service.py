@@ -15,7 +15,6 @@ from bot.embeds import (
     attacker_defender_ids,
     direct_challenge_embed,
     live_match_embed,
-    match_cancelled_embed,
     match_completed_embed,
     match_expired_embed,
     open_challenge_embed,
@@ -272,14 +271,9 @@ class ChallengeService:
         if updated is None:
             return
 
-        if previous_status == STATUS_ACCEPTED:
-            await self._edit_channel_message(
-                updated, embed=match_cancelled_embed(updated, cancelled_by)
-            )
-            if updated.admin_message_id:
-                await self._delete_admin_message(updated.admin_message_id)
-        else:
-            await self._delete_channel_message(updated)
+        await self._delete_channel_message(updated)
+        if previous_status == STATUS_ACCEPTED and updated.admin_message_id:
+            await self._delete_admin_message(updated.admin_message_id)
 
     async def submit_result(
         self,
