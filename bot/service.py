@@ -13,7 +13,6 @@ from bot.embeds import (
     admin_match_started_embed,
     admin_result_embed,
     attacker_defender_ids,
-    challenge_cancelled_embed,
     direct_challenge_embed,
     live_match_embed,
     match_cancelled_embed,
@@ -274,14 +273,13 @@ class ChallengeService:
             return
 
         if previous_status == STATUS_ACCEPTED:
-            embed = match_cancelled_embed(updated, cancelled_by)
+            await self._edit_channel_message(
+                updated, embed=match_cancelled_embed(updated, cancelled_by)
+            )
+            if updated.admin_message_id:
+                await self._delete_admin_message(updated.admin_message_id)
         else:
-            embed = challenge_cancelled_embed(updated, cancelled_by)
-
-        await self._edit_channel_message(updated, embed=embed)
-
-        if previous_status == STATUS_ACCEPTED and updated.admin_message_id:
-            await self._delete_admin_message(updated.admin_message_id)
+            await self._delete_channel_message(updated)
 
     async def submit_result(
         self,
