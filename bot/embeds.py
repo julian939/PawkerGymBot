@@ -28,12 +28,12 @@ def direct_challenge_embed(ch: Challenge) -> discord.Embed:
         embed = discord.Embed(
             description=f"🗡️ {a} challenges {b}", color=COLOR_ATTACK
         )
-        #embed.set_footer(text="Use /defend to accept")
+        embed.set_footer(text="Click ✅ Accept to play as Defender")
         return embed
     embed = discord.Embed(
         description=f"🛡️ {a} challenges {b}", color=COLOR_DEFEND
     )
-    #embed.set_footer(text="Use /attack to accept")
+    embed.set_footer(text="Click ✅ Accept to play as Attacker")
     return embed
 
 
@@ -41,16 +41,16 @@ def open_challenge_embed(ch: Challenge) -> discord.Embed:
     a = f"<@{ch.challenger_id}>"
     if ch.challenge_type == TYPE_ATTACK:
         embed = discord.Embed(
-            description=f"🗡️ {a} looking for defender",
+            description=f"🗡️ {a} looking for a defender",
             color=COLOR_ATTACK,
         )
-        #embed.set_footer(text="Use /defend to accept")
+        embed.set_footer(text="Click ✅ Accept (or use /defend) to match")
         return embed
     embed = discord.Embed(
-        description=f"🛡️ {a} looking for attacker",
+        description=f"🛡️ {a} looking for an attacker",
         color=COLOR_DEFEND,
     )
-    #embed.set_footer(text="Use /attack to accept")
+    embed.set_footer(text="Click ✅ Accept (or use /attack) to match")
     return embed
 
 
@@ -60,16 +60,8 @@ def live_match_embed(ch: Challenge) -> discord.Embed:
         description=f"🗡️ <@{a}> vs 🛡️ <@{d}> · *`{ch.room_code}`*",
         color=COLOR_LIVE,
     )
-    embed.set_footer(text="Use /result to submit the match result")
+    embed.set_footer(text="Use /result to submit the match result · /cancel to abort")
     return embed
-
-
-def match_completed_embed(ch: Challenge) -> discord.Embed:
-    a, d = attacker_defender_ids(ch)
-    return discord.Embed(
-        description=f"✅ <@{a}> vs <@{d}> · result submitted",
-        color=COLOR_GRAY,
-    )
 
 
 def match_expired_embed(ch: Challenge) -> discord.Embed:
@@ -83,23 +75,12 @@ def match_expired_embed(ch: Challenge) -> discord.Embed:
 
 
 # ---------------------------------------------------------------------- #
-# Admin-channel embeds
+# Result log content (posted to RESULT_CHANNEL_ID — plain text, not embed)
 # ---------------------------------------------------------------------- #
 
-def admin_match_started_embed(ch: Challenge) -> discord.Embed:
+def result_log_content(ch: Challenge, submitted_by: int) -> str:
     a, d = attacker_defender_ids(ch)
-    return discord.Embed(
-        description=f"🗡️ <@{a}> vs 🛡️ <@{d}> · *`{ch.room_code}`*",
-        color=COLOR_LIVE,
-    )
-
-
-def admin_result_embed(ch: Challenge, submitted_by: int) -> discord.Embed:
-    a, d = attacker_defender_ids(ch)
-    return discord.Embed(
-        description=(
-            f"🗡️ <@{a}> vs 🛡️ <@{d}> · *`{ch.room_code}`* · "
-            f"submitted by <@{submitted_by}>"
-        ),
-        color=COLOR_LIVE,
+    return (
+        f"⚔️ <@{a}> vs. <@{d}> 🛡️\n"
+        f"-# submitted by <@{submitted_by}>"
     )

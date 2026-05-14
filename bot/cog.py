@@ -27,39 +27,55 @@ class ChallengesCog(commands.Cog):
         self.bot = bot
         self.service = service
         self.repo = repo
-        self.expire_accepted_loop.start()
+        self.expire_loop.start()
 
     def cog_unload(self) -> None:
-        self.expire_accepted_loop.cancel()
+        self.expire_loop.cancel()
 
     # ------------------------------------------------------------------ #
-    # Background: expire ACCEPTED matches with no /result after 24h
+    # Background: expire stale PENDING (>24h) and ACCEPTED (>24h) matches
     # ------------------------------------------------------------------ #
 
     @tasks.loop(minutes=5)
-    async def expire_accepted_loop(self) -> None:
-        hours = getattr(
-            self.bot.config, "accepted_match_expiry_hours", 24
-        )
+    async def expire_loop(self) -> None:
+        hours = getattr(self.bot.config, "pending_expiry_hours", 24)
         deadline = datetime.now(timezone.utc) - timedelta(hours=hours)
+        deadline_iso = deadline.isoformat()
+
         try:
-            expired = await self.repo.fetch_expired_accepted(
-                deadline_iso=deadline.isoformat()
+            expired_accepted = await self.repo.fetch_expired_accepted(
+                deadline_iso=deadline_iso
             )
         except Exception:
-            log.exception("expire_accepted_loop: fetch failed")
-            return
+            log.exception("expire_loop: fetch accepted failed")
+            expired_accepted = []
 
-        for ch in expired:
+        for ch in expired_accepted:
             try:
                 await self.service.expire_accepted_match(ch)
             except Exception:
                 log.exception(
-                    "expire_accepted_loop: failed to expire match %s", ch.id
+                    "expire_loop: failed to expire accepted match %s", ch.id
                 )
 
-    @expire_accepted_loop.before_loop
-    async def _before_expire_accepted_loop(self) -> None:
+        try:
+            expired_pending = await self.repo.fetch_expired_pending(
+                deadline_iso=deadline_iso
+            )
+        except Exception:
+            log.exception("expire_loop: fetch pending failed")
+            expired_pending = []
+
+        for ch in expired_pending:
+            try:
+                await self.service.expire_pending_challenge(ch)
+            except Exception:
+                log.exception(
+                    "expire_loop: failed to expire pending challenge %s", ch.id
+                )
+
+    @expire_loop.before_loop
+    async def _before_expire_loop(self) -> None:
         await self.bot.wait_until_ready()
 
     # ------------------------------------------------------------------ #
@@ -116,7 +132,8 @@ class ChallengesCog(commands.Cog):
     async def cancel(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id is None:
             await interaction.response.send_message(
-                "This command must be used in a server.", ephemeral=True
+                "This command only works in a server, not in DMs.",
+                ephemeral=True,
             )
             return
 
@@ -127,7 +144,7 @@ class ChallengesCog(commands.Cog):
 
         if not active:
             await interaction.response.send_message(
-                "You have no active challenges.", ephemeral=True
+                "You have no active challenges to cancel.", ephemeral=True
             )
             return
 

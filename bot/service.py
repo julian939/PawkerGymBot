@@ -5,19 +5,18 @@ from __future__ import annotations
 import io
 import logging
 
+import aiosqlite
 import discord
 
 from bot.code_generator import generate_unique_room_code
 from bot.config import Config
 from bot.embeds import (
-    admin_match_started_embed,
-    admin_result_embed,
     attacker_defender_ids,
     direct_challenge_embed,
     live_match_embed,
-    match_completed_embed,
     match_expired_embed,
     open_challenge_embed,
+    result_log_content,
 )
 from bot.models import (
     Challenge,
@@ -35,6 +34,10 @@ log = logging.getLogger(__name__)
 
 SILENT = discord.AllowedMentions.none()
 
+# Reject result attachments larger than this (8 MB is plenty for screenshots).
+MAX_RESULT_BYTES = 8 * 1024 * 1024
+ALLOWED_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
 
 def _ping_users(*user_ids: int) -> discord.AllowedMentions:
     return discord.AllowedMentions(
@@ -46,6 +49,13 @@ def _ping_users(*user_ids: int) -> discord.AllowedMentions:
 
 def _mentions(*user_ids: int) -> str:
     return " ".join(f"<@{uid}>" for uid in user_ids)
+
+
+def _is_image_attachment(att: discord.Attachment) -> bool:
+    if (att.content_type or "").startswith("image/"):
+        return True
+    name = (att.filename or "").lower()
+    return name.endswith(ALLOWED_IMAGE_EXTS)
 
 
 class ChallengeService:
@@ -74,35 +84,26 @@ class ChallengeService:
 
         if opponent.id == caller.id:
             await interaction.response.send_message(
-                "You can't challenge yourself.", ephemeral=True
+                "You can't challenge yourself. Pick another player.",
+                ephemeral=True,
             )
             return
         if opponent.bot:
             await interaction.response.send_message(
-                "Bots can't be challenged.", ephemeral=True
+                "Bots can't play — pick a real user.", ephemeral=True
             )
             return
         if interaction.guild_id is None:
             await interaction.response.send_message(
-                "This command must be used in a server.", ephemeral=True
-            )
-            return
-
-        if await self.repo.pair_has_pending(
-            caller.id, opponent.id, interaction.guild_id
-        ):
-            await interaction.response.send_message(
-                "You already have an open challenge with this user.",
+                "This command only works in a server, not in DMs.",
                 ephemeral=True,
             )
             return
 
-        pending_count = await self.repo.count_pending_by_challenger(caller.id)
-        if pending_count >= self.config.max_pending_per_user:
-            await interaction.response.send_message(
-                "You have too many pending challenges.", ephemeral=True
-            )
-            return
+        # Replace any previous PENDING challenge by the caller in this guild.
+        await self._cancel_existing_pending(
+            user_id=caller.id, guild_id=interaction.guild_id
+        )
 
         placeholder = Challenge(
             id=0,
@@ -150,47 +151,36 @@ class ChallengeService:
 
         if interaction.guild_id is None:
             await interaction.response.send_message(
-                "This command must be used in a server.", ephemeral=True
+                "This command only works in a server, not in DMs.",
+                ephemeral=True,
             )
             return
 
         wanted_type = TYPE_DEFEND if challenge_type == TYPE_ATTACK else TYPE_ATTACK
 
-        match = await self.repo.find_queue_match(
-            guild_id=interaction.guild_id,
-            wanted_type=wanted_type,
-            requester_id=caller.id,
-        )
-
-        if match is not None:
-            code = await generate_unique_room_code(self.repo)
-            updated = await self.repo.accept_atomic(match.id, caller.id, code)
+        # Try the queue up to twice — once normally, once after a race-loss.
+        for _ in range(2):
+            match = await self.repo.find_queue_match(
+                guild_id=interaction.guild_id,
+                wanted_type=wanted_type,
+                requester_id=caller.id,
+            )
+            if match is None:
+                break
+            updated = await self._accept_with_code_retry(match, caller.id)
             if updated is not None:
                 await interaction.response.send_message(
-                    "Matched!", ephemeral=True
+                    "Matched! Check the channel for your room code.",
+                    ephemeral=True,
                 )
                 await self._finalize_accepted_match(updated)
                 return
-            # Race lost — fall through
+            # Race lost — try the queue once more.
 
-        if await self.repo.has_pending_open(
-            challenger_id=caller.id,
-            guild_id=interaction.guild_id,
-            challenge_type=challenge_type,
-        ):
-            label = "attack" if challenge_type == TYPE_ATTACK else "defend"
-            await interaction.response.send_message(
-                f"You already have an open `/{label}` challenge.",
-                ephemeral=True,
-            )
-            return
-
-        pending_count = await self.repo.count_pending_by_challenger(caller.id)
-        if pending_count >= self.config.max_pending_per_user:
-            await interaction.response.send_message(
-                "You have too many pending challenges.", ephemeral=True
-            )
-            return
+        # No queue match — create / replace our own open challenge.
+        await self._cancel_existing_pending(
+            user_id=caller.id, guild_id=interaction.guild_id
+        )
 
         placeholder = Challenge(
             id=0,
@@ -232,9 +222,8 @@ class ChallengeService:
         interaction: discord.Interaction,
         challenge: Challenge,
     ) -> None:
-        code = await generate_unique_room_code(self.repo)
-        updated = await self.repo.accept_atomic(
-            challenge.id, interaction.user.id, code
+        updated = await self._accept_with_code_retry(
+            challenge, interaction.user.id
         )
         if updated is None:
             await interaction.response.send_message(
@@ -242,8 +231,13 @@ class ChallengeService:
             )
             return
 
-        # Silent ack — public live embed is the user-visible confirmation.
-        await interaction.response.defer()
+        # Disarm the Accept button immediately so a double-click can't trigger
+        # a second accept while we're posting the live embed.
+        try:
+            await interaction.response.edit_message(view=None)
+        except (discord.NotFound, discord.HTTPException):
+            log.debug("accept_challenge: edit_message ack failed", exc_info=True)
+
         await self._finalize_accepted_match(updated)
 
     async def expire_accepted_match(self, ch: Challenge) -> None:
@@ -255,8 +249,14 @@ class ChallengeService:
         await self._edit_channel_message(
             updated, embed=match_expired_embed(updated)
         )
-        if updated.admin_message_id:
-            await self._delete_admin_message(updated.admin_message_id)
+
+    async def expire_pending_challenge(self, ch: Challenge) -> None:
+        updated = await self.repo.set_status(
+            ch.id, STATUS_CANCELLED, cancelled_by=None
+        )
+        if updated is None:
+            return
+        await self._delete_channel_message(updated)
 
     async def cancel_challenge(
         self,
@@ -264,16 +264,14 @@ class ChallengeService:
         challenge: Challenge,
         cancelled_by: int,
     ) -> None:
-        previous_status = challenge.status
         updated = await self.repo.set_status(
             challenge.id, STATUS_CANCELLED, cancelled_by=cancelled_by
         )
         if updated is None:
+            # Already terminal (raced with /result or another cancel).
             return
 
         await self._delete_channel_message(updated)
-        if previous_status == STATUS_ACCEPTED and updated.admin_message_id:
-            await self._delete_admin_message(updated.admin_message_id)
 
     async def submit_result(
         self,
@@ -282,20 +280,30 @@ class ChallengeService:
     ) -> None:
         if interaction.guild_id is None:
             await interaction.response.send_message(
-                "This command must be used in a server.", ephemeral=True
-            )
-            return
-
-        if self.config.admin_channel_id is None:
-            await interaction.response.send_message(
-                "Result reporting is not configured on this server.",
+                "This command only works in a server, not in DMs.",
                 ephemeral=True,
             )
             return
 
-        if not (screenshot.content_type or "").startswith("image/"):
+        if self.config.result_channel_id is None:
             await interaction.response.send_message(
-                "Please upload an image file.", ephemeral=True
+                "Result reporting isn't configured on this server. "
+                "Ask an admin to set RESULT_CHANNEL_ID.",
+                ephemeral=True,
+            )
+            return
+
+        if not _is_image_attachment(screenshot):
+            await interaction.response.send_message(
+                "Please upload an image (.png, .jpg, .webp, .gif).",
+                ephemeral=True,
+            )
+            return
+
+        if screenshot.size and screenshot.size > MAX_RESULT_BYTES:
+            await interaction.response.send_message(
+                "That screenshot is too big (max 8 MB). Compress it and try again.",
+                ephemeral=True,
             )
             return
 
@@ -305,7 +313,8 @@ class ChallengeService:
         )
         if not matches:
             await interaction.response.send_message(
-                "You have no active match to report.", ephemeral=True
+                "You have no active match to report. Use /attack or /defend first.",
+                ephemeral=True,
             )
             return
 
@@ -360,55 +369,121 @@ class ChallengeService:
         file_bytes: bytes,
         filename: str,
     ) -> tuple[bool, str]:
-        """Send screenshot to admin channel and complete the match.
-
-        Returns (success, user_facing_message). The caller decides how to
-        surface the message (followup vs edit_message) to avoid duplicate
-        ephemerals.
-        """
-        admin_channel_id = self.config.admin_channel_id
-        if admin_channel_id is None:
-            return False, "Result reporting is not configured on this server."
+        """Send screenshot to the result log channel and complete the match."""
+        channel_id = self.config.result_channel_id
+        if channel_id is None:
+            return False, "Result reporting isn't configured on this server."
 
         try:
-            channel = self.bot.get_channel(admin_channel_id)
+            channel = self.bot.get_channel(channel_id)
             if channel is None:
-                channel = await self.bot.fetch_channel(admin_channel_id)
+                channel = await self.bot.fetch_channel(channel_id)
             file = discord.File(io.BytesIO(file_bytes), filename=filename)
             await channel.send(
-                embed=admin_result_embed(match, submitted_by),
+                content=result_log_content(match, submitted_by),
                 file=file,
                 allowed_mentions=SILENT,
             )
         except (discord.NotFound, discord.Forbidden):
             log.warning(
-                "Admin channel %s unreachable for /result", admin_channel_id
+                "Result channel %s unreachable for /result", channel_id
             )
-            return False, "Admin channel unreachable. Result not submitted."
+            return False, "Result channel unreachable. Result not submitted."
 
         completed = await self.repo.set_status(match.id, STATUS_COMPLETED)
         if completed is not None:
-            await self._edit_channel_message(
-                completed, embed=match_completed_embed(completed)
+            # Live embed in the game channel no longer adds info — remove it.
+            await self._delete_channel_message(completed)
+            return True, "Result submitted. Thanks!"
+
+        # Row was no longer ACCEPTED (already cancelled/completed). Log only.
+        log.info(
+            "finalize_result: challenge %s not in ACCEPTED state, log only",
+            match.id,
+        )
+        return True, "Result logged."
+
+    # ------------------------------------------------------------------ #
+    # Internals
+    # ------------------------------------------------------------------ #
+
+    async def _accept_with_code_retry(
+        self, match: Challenge, opponent_id: int, attempts: int = 5
+    ) -> Challenge | None:
+        """Try to accept; retry on rare room_code uniqueness collisions."""
+        for _ in range(attempts):
+            code = await generate_unique_room_code(self.repo)
+            try:
+                return await self.repo.accept_atomic(
+                    match.id, opponent_id, code
+                )
+            except aiosqlite.IntegrityError:
+                log.warning(
+                    "Room code collision on accept for match %s; retrying",
+                    match.id,
+                )
+                continue
+        log.error(
+            "Gave up generating unique room code for match %s", match.id
+        )
+        return None
+
+    async def _cancel_existing_pending(
+        self,
+        *,
+        user_id: int,
+        guild_id: int,
+        except_id: int | None = None,
+    ) -> None:
+        """Cancel all PENDING challenges by this user (and delete their embeds).
+
+        Used when the user starts a fresh /attack or /defend to clear the
+        previous attempt automatically — see also the queue-match path where
+        the user just got matched and any leftover open challenge is stale.
+        """
+        pending = await self.repo.find_pending_by_challenger(
+            user_id=user_id, guild_id=guild_id
+        )
+        for ch in pending:
+            if except_id is not None and ch.id == except_id:
+                continue
+            updated = await self.repo.set_status(
+                ch.id, STATUS_CANCELLED, cancelled_by=user_id
             )
-            if completed.admin_message_id:
-                await self._delete_admin_message(completed.admin_message_id)
-
-        return True, "Result submitted."
-
-    # ------------------------------------------------------------------ #
-    # Helpers
-    # ------------------------------------------------------------------ #
+            if updated is not None:
+                await self._delete_channel_message(updated)
 
     async def _finalize_accepted_match(self, updated: Challenge) -> None:
-        await self._delete_channel_message(updated)
+        """Post the live embed, persist its message_id, then delete the old one.
+
+        Posting first (instead of delete-then-post) guarantees the room code
+        is visible even if a later step fails. The new message_id is written
+        back to the DB so /cancel deletes the right message.
+        """
+        # Clear any stale PENDING challenges either participant still has.
+        if updated.opponent_id is not None:
+            await self._cancel_existing_pending(
+                user_id=updated.challenger_id,
+                guild_id=updated.guild_id,
+                except_id=updated.id,
+            )
+            await self._cancel_existing_pending(
+                user_id=updated.opponent_id,
+                guild_id=updated.guild_id,
+                except_id=updated.id,
+            )
+
+        old_channel_id = updated.channel_id
+        old_message_id = updated.message_id
 
         a_id, d_id = attacker_defender_ids(updated)
+
+        new_message: discord.Message | None = None
         try:
             channel = self.bot.get_channel(updated.channel_id)
             if channel is None:
                 channel = await self.bot.fetch_channel(updated.channel_id)
-            await channel.send(
+            new_message = await channel.send(
                 content=_mentions(a_id, d_id),
                 embed=live_match_embed(updated),
                 allowed_mentions=_ping_users(a_id, d_id),
@@ -426,80 +501,77 @@ class ChallengeService:
                 updated.channel_id,
             )
 
-        await self._notify_admin_match_started(updated)
+        if new_message is not None:
+            await self.repo.set_message_id(updated.id, new_message.id)
+            # Now delete the old PENDING embed.
+            await self._delete_message(old_channel_id, old_message_id)
+        else:
+            # Couldn't post a new message — edit the old one in place so the
+            # room code is still visible to the players.
+            await self._edit_message(
+                old_channel_id,
+                old_message_id,
+                embed=live_match_embed(updated),
+            )
 
-    async def _notify_admin_match_started(self, ch: Challenge) -> None:
-        channel_id = self.config.admin_channel_id
-        if channel_id is None:
-            return
+    # ---------------------- low-level message helpers ----------------- #
+
+    async def _resolve_channel(self, channel_id: int):
         try:
             channel = self.bot.get_channel(channel_id)
             if channel is None:
                 channel = await self.bot.fetch_channel(channel_id)
-            sent = await channel.send(
-                embed=admin_match_started_embed(ch),
-                allowed_mentions=SILENT,
-            )
-            await self.repo.set_admin_message_id(ch.id, sent.id)
         except discord.NotFound:
-            log.warning(
-                "Admin channel %s not found; skipping notification", channel_id
-            )
-        except discord.Forbidden:
-            log.warning(
-                "Missing permissions to post to admin channel %s", channel_id
-            )
+            return None
         except Exception:
-            log.exception("Failed to send admin notification for %s", ch.id)
+            log.exception("Failed to resolve channel %s", channel_id)
+            return None
+        return channel
 
-    async def _delete_admin_message(self, message_id: int) -> None:
-        channel_id = self.config.admin_channel_id
-        if channel_id is None:
+    async def _delete_message(self, channel_id: int, message_id: int) -> None:
+        channel = await self._resolve_channel(channel_id)
+        if channel is None:
             return
-        try:
-            channel = self.bot.get_channel(channel_id)
-            if channel is None:
-                channel = await self.bot.fetch_channel(channel_id)
-            partial = channel.get_partial_message(message_id)
-            await partial.delete()
-        except discord.NotFound:
-            pass
-        except discord.Forbidden:
-            log.warning(
-                "Missing permissions to delete admin message %s", message_id
-            )
-        except Exception:
-            log.exception("Failed to delete admin message %s", message_id)
-
-    async def _delete_channel_message(self, ch: Challenge) -> None:
-        try:
-            channel = self.bot.get_channel(ch.channel_id)
-            if channel is None:
-                channel = await self.bot.fetch_channel(ch.channel_id)
-        except discord.NotFound:
-            return
-        except Exception:
-            log.exception("Failed to resolve channel for %s", ch.id)
-            return
-
-        partial = channel.get_partial_message(ch.message_id)
+        partial = channel.get_partial_message(message_id)
         try:
             await partial.delete()
         except discord.NotFound:
             pass
         except discord.Forbidden:
             log.info(
-                "Cannot delete challenge %s message; clearing buttons instead",
-                ch.id,
+                "Cannot delete message %s in %s; clearing instead",
+                message_id,
+                channel_id,
             )
             try:
                 await partial.edit(content=None, embed=None, view=None)
             except Exception:
                 log.exception(
-                    "Fallback edit also failed for challenge %s", ch.id
+                    "Fallback edit also failed for message %s", message_id
                 )
         except Exception:
-            log.exception("Failed to delete channel message for %s", ch.id)
+            log.exception("Failed to delete message %s", message_id)
+
+    async def _edit_message(
+        self, channel_id: int, message_id: int, *, embed: discord.Embed
+    ) -> None:
+        channel = await self._resolve_channel(channel_id)
+        if channel is None:
+            return
+        partial = channel.get_partial_message(message_id)
+        try:
+            await partial.edit(
+                content=None, embed=embed, view=None, allowed_mentions=SILENT
+            )
+        except discord.NotFound:
+            log.info("Message %s not found; skipping edit", message_id)
+        except discord.Forbidden:
+            log.warning("No permission to edit message %s", message_id)
+        except Exception:
+            log.exception("Unexpected error editing message %s", message_id)
+
+    async def _delete_channel_message(self, ch: Challenge) -> None:
+        await self._delete_message(ch.channel_id, ch.message_id)
 
     async def _edit_channel_message(
         self,
@@ -507,21 +579,4 @@ class ChallengeService:
         *,
         embed: discord.Embed,
     ) -> None:
-        try:
-            channel = self.bot.get_channel(ch.channel_id)
-            if channel is None:
-                channel = await self.bot.fetch_channel(ch.channel_id)
-            partial = channel.get_partial_message(ch.message_id)
-            await partial.edit(
-                content=None, embed=embed, view=None, allowed_mentions=SILENT
-            )
-        except discord.NotFound:
-            log.info(
-                "Challenge %s message/channel not found; skipping edit", ch.id
-            )
-        except discord.Forbidden:
-            log.warning(
-                "Missing permissions to edit message for challenge %s", ch.id
-            )
-        except Exception:
-            log.exception("Unexpected error editing channel message for %s", ch.id)
+        await self._edit_message(ch.channel_id, ch.message_id, embed=embed)

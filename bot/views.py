@@ -114,19 +114,29 @@ async def _select_label(
     guild: discord.Guild | None,
     client: discord.Client | None,
 ) -> str:
-    type_label = "Attack" if ch.challenge_type == TYPE_ATTACK else "Defend"
-    status_label = "Live" if ch.status == STATUS_ACCEPTED else "Pending"
+    role = "Attack" if ch.challenge_type == TYPE_ATTACK else "Defend"
 
-    if ch.opponent_id is None:
-        label = f"Open {type_label} — {status_label}"
-    else:
+    if ch.status == STATUS_ACCEPTED:
         other_id = (
             ch.opponent_id
             if ch.challenger_id == user_id
             else ch.challenger_id
         )
-        other = await _resolve_name(other_id, guild, client)
-        label = f"vs {other} — {type_label} — {status_label}"
+        if other_id is None:
+            label = f"🟢 Live match · code {ch.room_code}"
+        else:
+            other = await _resolve_name(other_id, guild, client)
+            label = f"🟢 Live vs {other} · code {ch.room_code}"
+    else:
+        # PENDING
+        if ch.opponent_id is None:
+            label = f"⏳ Open {role.lower()} — waiting for opponent"
+        elif ch.challenger_id == user_id:
+            other = await _resolve_name(ch.opponent_id, guild, client)
+            label = f"⏳ Sent to {other} — not yet accepted"
+        else:
+            other = await _resolve_name(ch.challenger_id, guild, client)
+            label = f"⏳ From {other} — pending your accept"
 
     if len(label) > 100:
         label = label[:97] + "..."
@@ -135,8 +145,8 @@ async def _select_label(
 
 def _select_description(ch: Challenge) -> str:
     if ch.status == STATUS_ACCEPTED and ch.room_code:
-        return f"Code: {ch.room_code}"
-    return "Pending — no room code yet"
+        return f"Active match · /result to submit"
+    return "Pending · not yet matched"
 
 
 class _CancelSelect(discord.ui.Select):
@@ -315,6 +325,14 @@ class _ResultSelect(discord.ui.Select):
             )
             return
 
+        # Guard against double-clicks while finalize_result is in flight.
+        if view.submitted:
+            await interaction.response.send_message(
+                "Already submitted.", ephemeral=True
+            )
+            return
+        view.submitted = True
+
         ch = view.challenges_by_id.get(int(self.values[0]))
         if ch is None:
             await interaction.response.send_message(
@@ -322,7 +340,12 @@ class _ResultSelect(discord.ui.Select):
             )
             return
 
-        await interaction.response.defer()
+        # Disable the select + ack the interaction so subsequent clicks no-op.
+        self.disabled = True
+        await interaction.response.edit_message(
+            content="Submitting result…", view=view
+        )
+
         _, msg = await view.service.finalize_result(
             match=ch,
             submitted_by=interaction.user.id,
@@ -358,6 +381,7 @@ class ResultPickerView(discord.ui.View):
         self.file_bytes = file_bytes
         self.filename = filename
         self.message: discord.Message | discord.WebhookMessage | None = None
+        self.submitted = False
         self.add_item(_ResultSelect(all_options))
 
     async def on_timeout(self) -> None:

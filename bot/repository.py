@@ -5,6 +5,7 @@ from bot.models import (
     Challenge,
     STATUS_ACCEPTED,
     STATUS_CANCELLED,
+    STATUS_COMPLETED,
     STATUS_PENDING,
 )
 
@@ -116,6 +117,7 @@ class ChallengeRepository:
                 accepted_at = ?
             WHERE id = ?
               AND status = ?
+              AND challenger_id <> ?
               AND (opponent_id IS NULL OR opponent_id = ?)
             RETURNING *;
         """
@@ -127,19 +129,18 @@ class ChallengeRepository:
             challenge_id,
             STATUS_PENDING,
             opponent_id,
+            opponent_id,
         )
         async with self.db.lock:
             row = await self._fetchrow(sql, params)
             await self.db.conn.commit()
         return Challenge.from_record(row) if row else None
 
-    async def set_admin_message_id(
-        self, challenge_id: int, admin_message_id: int
-    ) -> None:
+    async def set_message_id(self, challenge_id: int, message_id: int) -> None:
         async with self.db.lock:
             await self.db.conn.execute(
-                "UPDATE challenges SET admin_message_id = ? WHERE id = ?;",
-                (admin_message_id, challenge_id),
+                "UPDATE challenges SET message_id = ? WHERE id = ?;",
+                (message_id, challenge_id),
             )
             await self.db.conn.commit()
 
@@ -166,23 +167,35 @@ class ChallengeRepository:
         user_id: int,
         guild_id: int,
     ) -> list[Challenge]:
+        """All PENDING/ACCEPTED rows where the user is challenger or opponent."""
         sql = """
             SELECT *
             FROM challenges
             WHERE guild_id = ?
-              AND (
-                    (status = ? AND challenger_id = ?)
-                 OR (status = ? AND (challenger_id = ? OR opponent_id = ?))
-              )
+              AND status IN (?, ?)
+              AND (challenger_id = ? OR opponent_id = ?)
             ORDER BY created_at DESC;
         """
         rows = await self._fetchall(
             sql,
-            (
-                guild_id,
-                STATUS_PENDING, user_id,
-                STATUS_ACCEPTED, user_id, user_id,
-            ),
+            (guild_id, STATUS_PENDING, STATUS_ACCEPTED, user_id, user_id),
+        )
+        return [Challenge.from_record(r) for r in rows]
+
+    async def find_pending_by_challenger(
+        self, *, user_id: int, guild_id: int
+    ) -> list[Challenge]:
+        """Open/direct PENDING challenges created by this user in the guild."""
+        sql = """
+            SELECT *
+            FROM challenges
+            WHERE guild_id = ?
+              AND status = ?
+              AND challenger_id = ?
+            ORDER BY created_at DESC;
+        """
+        rows = await self._fetchall(
+            sql, (guild_id, STATUS_PENDING, user_id)
         )
         return [Challenge.from_record(r) for r in rows]
 
@@ -197,6 +210,18 @@ class ChallengeRepository:
               AND accepted_at < ?;
         """
         rows = await self._fetchall(sql, (STATUS_ACCEPTED, deadline_iso))
+        return [Challenge.from_record(r) for r in rows]
+
+    async def fetch_expired_pending(
+        self, *, deadline_iso: str
+    ) -> list[Challenge]:
+        sql = """
+            SELECT *
+            FROM challenges
+            WHERE status = ?
+              AND created_at < ?;
+        """
+        rows = await self._fetchall(sql, (STATUS_PENDING, deadline_iso))
         return [Challenge.from_record(r) for r in rows]
 
     async def find_accepted_for_user(
@@ -226,6 +251,7 @@ class ChallengeRepository:
         *,
         cancelled_by: int | None = None,
     ) -> Challenge | None:
+        """Transition a challenge. Only PENDING/ACCEPTED rows can change."""
         if status == STATUS_CANCELLED:
             sql = """
                 UPDATE challenges
@@ -233,9 +259,26 @@ class ChallengeRepository:
                     cancelled_at = ?,
                     cancelled_by = ?
                 WHERE id = ?
+                  AND status IN (?, ?)
                 RETURNING *;
             """
-            params = (status, _now_iso(), cancelled_by, challenge_id)
+            params = (
+                status,
+                _now_iso(),
+                cancelled_by,
+                challenge_id,
+                STATUS_PENDING,
+                STATUS_ACCEPTED,
+            )
+        elif status == STATUS_COMPLETED:
+            sql = """
+                UPDATE challenges
+                SET status = ?
+                WHERE id = ?
+                  AND status = ?
+                RETURNING *;
+            """
+            params = (status, challenge_id, STATUS_ACCEPTED)
         else:
             sql = """
                 UPDATE challenges
@@ -249,64 +292,3 @@ class ChallengeRepository:
             row = await self._fetchrow(sql, params)
             await self.db.conn.commit()
         return Challenge.from_record(row) if row else None
-
-    async def count_pending_by_challenger(self, user_id: int) -> int:
-        val = await self._fetchval(
-            """
-            SELECT COUNT(*)
-            FROM challenges
-            WHERE challenger_id = ?
-              AND status = ?;
-            """,
-            (user_id, STATUS_PENDING),
-        )
-        return int(val or 0)
-
-    async def pair_has_pending(
-        self,
-        user_a: int,
-        user_b: int,
-        guild_id: int,
-    ) -> bool:
-        sql = """
-            SELECT EXISTS(
-                SELECT 1
-                FROM challenges
-                WHERE guild_id = ?
-                  AND status = ?
-                  AND opponent_id IS NOT NULL
-                  AND (
-                       (challenger_id = ? AND opponent_id = ?)
-                    OR (challenger_id = ? AND opponent_id = ?)
-                  )
-            );
-        """
-        val = await self._fetchval(
-            sql,
-            (guild_id, STATUS_PENDING, user_a, user_b, user_b, user_a),
-        )
-        return bool(val)
-
-    async def has_pending_open(
-        self,
-        *,
-        challenger_id: int,
-        guild_id: int,
-        challenge_type: str,
-    ) -> bool:
-        sql = """
-            SELECT EXISTS(
-                SELECT 1
-                FROM challenges
-                WHERE guild_id = ?
-                  AND status = ?
-                  AND challenge_type = ?
-                  AND challenger_id = ?
-                  AND opponent_id IS NULL
-            );
-        """
-        val = await self._fetchval(
-            sql,
-            (guild_id, STATUS_PENDING, challenge_type, challenger_id),
-        )
-        return bool(val)
